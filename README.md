@@ -56,7 +56,7 @@ print the same **trust code**, and the file lands verified and encrypted.
 | **Actually fast** | ~400 MiB/s measured on real hardware (see [Performance](#performance)). Fully pipelined, `tokio`-powered, zero-copy chunking. |
 | **Pretty** | Multi-progress bars per file + overall, per-chunk rate, ETA, trust-code prompts. |
 | **Scriptable** | `--json` summaries, `--quiet`, `--yes`, `--dry-run`, shell completions. |
-| **One static binary** | Single file, no runtime deps, ~2 MB, ships on Linux (glibc/musl), macOS (Intel/ARM), Windows. |
+| **One static binary** | Single static file, no runtime deps, 3.5 MB, ships on Linux (glibc/musl), macOS (Intel/ARM), Windows. |
 
 ---
 
@@ -65,6 +65,7 @@ print the same **trust code**, and the file lands verified and encrypted.
 ### Homebrew
 
 ```bash
+brew tap hakuxyz/tap   # or just:
 brew install hakuxyz/tap/rustdrop
 ```
 
