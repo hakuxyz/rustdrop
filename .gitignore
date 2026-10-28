@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+*.swp
+.DS_Store
+/.idea
+.vscode/
+
+# received transfer litter
+*.rustdrop-part
+__pycache__/
+*.pyc
