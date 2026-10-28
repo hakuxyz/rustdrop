@@ -2,7 +2,7 @@
 name = "rustdrop"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["hakuxyz <beamzbyhakz@proton.me>"]
 description = "Privacy-first, blazing-fast peer-to-peer file transfer for your local network"
 license = "MIT"

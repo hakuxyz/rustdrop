@@ -77,7 +77,8 @@ impl ProgressSink for NullProgress {}
 
 /// Raw-deflate compress a chunk, but only when it actually shrinks.
 ///
-/// Returns the payload to transmit plus the [`FLAG_COMPRESSED`] marker (0 for
+/// Returns the payload to transmit plus the
+/// [`FLAG_COMPRESSED`](crate::protocol::FLAG_COMPRESSED) marker (0 for
 /// stored/uncompressed data). Incompressible data costs nothing but a flag bit.
 pub fn compress_chunk(data: &[u8]) -> (Vec<u8>, u8) {
     use std::io::Write;
@@ -260,12 +261,11 @@ fn entry_for(path: &Path, top_name: &Path, base: &Path) -> Result<FileEntry> {
     }
 
     // Guarantee the top-level name survives even for odd inputs.
-    if components.first().map(String::as_str) != top_name.to_str() {
-        if let Some(first) = components.first_mut() {
-            if !path.starts_with(base) {
-                *first = top_name.to_string_lossy().into_owned();
-            }
-        }
+    if components.first().map(String::as_str) != top_name.to_str()
+        && let Some(first) = components.first_mut()
+        && !path.starts_with(base)
+    {
+        *first = top_name.to_string_lossy().into_owned();
     }
 
     let meta = std::fs::metadata(path).map_err(RustDropError::Io)?;

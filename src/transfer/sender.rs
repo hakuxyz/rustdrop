@@ -24,7 +24,7 @@ pub struct SendRequest {
     pub targets: Vec<SocketAddr>,
     pub sender_name: String,
     pub passphrase: Option<String>,
-    /// Plaintext chunk size (clamped to [`MAX_CHUNK_SIZE`]).
+    /// Plaintext chunk size (clamped to [`MAX_CHUNK_SIZE`](crate::crypto::MAX_CHUNK_SIZE)).
     pub chunk_size: usize,
     /// Expected trust code; when set, a mismatch aborts before any data flows.
     pub trust_code: Option<String>,
@@ -184,13 +184,13 @@ async fn handshake(
     let keys = SessionKeys::derive(&shared, req.passphrase.as_deref())?;
     progress.trust_code(&keys.trust_code);
 
-    if let Some(expected) = &req.trust_code {
-        if !trust_codes_match(expected, &keys.trust_code) {
-            return Err(RustDropError::TrustCodeMismatch {
-                expected: expected.clone(),
-                actual: keys.trust_code.clone(),
-            });
-        }
+    if let Some(expected) = &req.trust_code
+        && !trust_codes_match(expected, &keys.trust_code)
+    {
+        return Err(RustDropError::TrustCodeMismatch {
+            expected: expected.clone(),
+            actual: keys.trust_code.clone(),
+        });
     }
 
     Ok((keys, ack.receiver_name))

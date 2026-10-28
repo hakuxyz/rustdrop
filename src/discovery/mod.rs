@@ -115,10 +115,10 @@ pub async fn discover(filter: Option<&str>, window: Duration) -> Result<Vec<Disc
         if now >= deadline {
             break;
         }
-        if let Some(until) = grace_until {
-            if now >= until {
-                break;
-            }
+        if let Some(until) = grace_until
+            && now >= until
+        {
+            break;
         }
 
         let remaining = deadline.saturating_duration_since(now);
@@ -204,16 +204,13 @@ fn matches_filter(receiver: &DiscoveredReceiver, filter: &str) -> bool {
 /// *without sending a single packet*, which is all we need to learn the source
 /// address the rest of the LAN will see us from.
 pub fn local_ipv4() -> Ipv4Addr {
-    if let Ok(sock) = UdpSocket::bind("0.0.0.0:0") {
-        if sock.connect("192.0.2.1:80").is_ok() {
-            if let Ok(addr) = sock.local_addr() {
-                if let IpAddr::V4(ip) = addr.ip() {
-                    if !ip.is_unspecified() {
-                        return ip;
-                    }
-                }
-            }
-        }
+    if let Ok(sock) = UdpSocket::bind("0.0.0.0:0")
+        && sock.connect("192.0.2.1:80").is_ok()
+        && let Ok(addr) = sock.local_addr()
+        && let IpAddr::V4(ip) = addr.ip()
+        && !ip.is_unspecified()
+    {
+        return ip;
     }
     Ipv4Addr::LOCALHOST
 }

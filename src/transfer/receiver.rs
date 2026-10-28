@@ -200,15 +200,15 @@ impl Receiver {
 
         // Trust code first: a mismatch means nothing else on this wire is
         // trustworthy, and we must not leak whether the payload parses.
-        if let Some(expected) = &req.trust_code {
-            if !codes_equal(expected, &keys.trust_code) {
-                let reason = format!("trust code mismatch (expected {expected})");
-                send_abort(&mut stream, &mut ack_channel, &reason).await;
-                return Err(RustDropError::TrustCodeMismatch {
-                    expected: expected.clone(),
-                    actual: keys.trust_code.clone(),
-                });
-            }
+        if let Some(expected) = &req.trust_code
+            && !codes_equal(expected, &keys.trust_code)
+        {
+            let reason = format!("trust code mismatch (expected {expected})");
+            send_abort(&mut stream, &mut ack_channel, &reason).await;
+            return Err(RustDropError::TrustCodeMismatch {
+                expected: expected.clone(),
+                actual: keys.trust_code.clone(),
+            });
         }
 
         let mut manifest_channel = keys.manifest_channel();
@@ -278,12 +278,12 @@ impl Receiver {
         }
 
         for dest in &destinations {
-            if let Some(parent) = dest.parent() {
-                if let Err(err) = tokio::fs::create_dir_all(parent).await {
-                    let reason = format!("cannot create '{}': {err}", parent.display());
-                    send_abort(&mut stream, &mut ack_channel, &reason).await;
-                    return Err(RustDropError::Io(err));
-                }
+            if let Some(parent) = dest.parent()
+                && let Err(err) = tokio::fs::create_dir_all(parent).await
+            {
+                let reason = format!("cannot create '{}': {err}", parent.display());
+                send_abort(&mut stream, &mut ack_channel, &reason).await;
+                return Err(RustDropError::Io(err));
             }
         }
 
@@ -639,10 +639,10 @@ async fn send_abort(stream: &mut TcpStream, channel: &mut AeadChannel, reason: &
     let abort = Ack::Abort {
         reason: reason.to_string(),
     };
-    if let Ok(encoded) = abort.encode() {
-        if let Ok(sealed) = channel.seal(&encoded) {
-            let _ = write_frame(stream, &sealed).await;
-        }
+    if let Ok(encoded) = abort.encode()
+        && let Ok(sealed) = channel.seal(&encoded)
+    {
+        let _ = write_frame(stream, &sealed).await;
     }
 }
 

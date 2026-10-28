@@ -86,10 +86,10 @@ impl CliProgress {
     }
 
     fn clear_spinner(&self) {
-        if let Ok(mut guard) = self.spinner.lock() {
-            if let Some(bar) = guard.take() {
-                bar.finish_and_clear();
-            }
+        if let Ok(mut guard) = self.spinner.lock()
+            && let Some(bar) = guard.take()
+        {
+            bar.finish_and_clear();
         }
     }
 
@@ -188,15 +188,15 @@ impl ProgressSink for CliProgress {
     }
 
     fn finish(&self, report: &TransferReport) {
-        if let Ok(guard) = self.overall.lock() {
-            if let Some(bar) = guard.as_ref() {
-                bar.finish_with_message("done");
-            }
+        if let Ok(guard) = self.overall.lock()
+            && let Some(bar) = guard.as_ref()
+        {
+            bar.finish_with_message("done");
         }
-        if let Ok(guard) = self.file.lock() {
-            if let Some(bar) = guard.as_ref() {
-                bar.finish_and_clear();
-            }
+        if let Ok(guard) = self.file.lock()
+            && let Some(bar) = guard.as_ref()
+        {
+            bar.finish_and_clear();
         }
         self.clear_spinner();
         if !self.quiet {
