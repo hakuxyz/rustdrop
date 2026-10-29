@@ -32,11 +32,11 @@ jobs:
           - os: ubuntu-latest
             target: aarch64-linux-android
             archive: tar.gz
-            use-cross: true
+            android-abi: arm64-v8a
           - os: ubuntu-latest
             target: armv7-linux-androideabi
             archive: tar.gz
-            use-cross: true
+            android-abi: armeabi-v7a
           - os: macos-latest
             target: x86_64-apple-darwin
             archive: tar.gz
@@ -67,13 +67,26 @@ jobs:
         if: matrix.use-cross
         run: cargo install cross --locked
 
+      - name: Install cargo-ndk (Android)
+        if: matrix.android-abi
+        run: cargo install cargo-ndk --locked
+
       - name: Build (cargo)
-        if: '!matrix.use-cross'
+        if: '!matrix.use-cross && !matrix.android-abi'
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: matrix.use-cross
         run: cross build --release --locked --target ${{ matrix.target }}
+
+      - name: Build (Android, cargo-ndk)
+        if: matrix.android-abi
+        env:
+          ANDROID_API: "24"
+        run: |
+          echo "NDK: ${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}"
+          find "${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}" -name 'libunwind.a' 2>/dev/null | head -3
+          cargo ndk -t ${{ matrix.android-abi }} -p $ANDROID_API build --release --locked
 
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
