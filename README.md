@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <em>Above: real transfer between two terminals — mDNS discovery, matching trust codes, per-chunk progress, BLAKE3 verification.</em><br/>
+  <em>Above: real transfer between two terminals - mDNS discovery, matching trust codes, per-chunk progress, BLAKE3 verification.</em><br/>
   <sub>Regenerate with <code>vhs demo/demo.tape</code> or <code>python3 demo/render.py</code>.</sub>
 </p>
 
@@ -32,10 +32,10 @@
 ## TL;DR
 
 ```bash
-# Terminal A — receive into ./downloads
+# Terminal A - receive into ./downloads
 rustdrop receive -o downloads
 
-# Terminal B — auto-discover the receiver and send
+# Terminal B - auto-discover the receiver and send
 rustdrop send ~/Photos/2026-holiday
 ```
 
@@ -51,7 +51,7 @@ print the same **trust code**, and the file lands verified and encrypted.
 | --- | --- |
 | **LAN-only by design** | TCP sockets stay on your subnet. There is no server, no relay, no phone-home. |
 | **Encrypted end-to-end** | Ephemeral X25519 → HKDF-SHA256 → ChaCha20-Poly1305, with optional passphrase hardening. |
-| **Trust codes** | An 8-character short-authentication-string appears on both sides — compare it, kill the connection if it differs. MITM detection without a CA. |
+| **Trust codes** | An 8-character short-authentication-string appears on both sides - compare it, kill the connection if it differs. MITM detection without a CA. |
 | **Zero configuration** | mDNS discovery (`_rustdrop._tcp`). Works the moment both machines are on the same network. |
 | **Actually fast** | ~400 MiB/s measured on real hardware (see [Performance](#performance)). Fully pipelined, `tokio`-powered, zero-copy chunking. |
 | **Pretty** | Multi-progress bars per file + overall, per-chunk rate, ETA, trust-code prompts. |
@@ -143,7 +143,7 @@ port with `--port 9000` / `--listen 0.0.0.0`.
 # Terminal A
 rustdrop receive --trust 7GKM-2XQ4 -o ./secrets
 
-# Terminal B — fails loudly if the codes don't match
+# Terminal B - fails loudly if the codes don't match
 rustdrop send -p 'correct horse battery staple' --trust 7GKM-2XQ4 secrets.tar
 ```
 
@@ -159,7 +159,7 @@ rustdrop send   -p 's3same-phrase' ./vault-backup/
 # or: export RUSTDROP_PASSPHRASE='s3same-phrase' on both sides
 ```
 
-The passphrase is mixed into the HKDF key schedule — an attacker who recorded
+The passphrase is mixed into the HKDF key schedule - an attacker who recorded
 the whole session still cannot decrypt it offline.
 
 ### 5. Squeeze the pipe
@@ -195,13 +195,13 @@ sequenceDiagram
     participant S as sender
     participant R as receiver
 
-    Note over S,R: 1. Discovery — mDNS announce / browse (_rustdrop._tcp)
+    Note over S,R: 1. Discovery - mDNS announce / browse (_rustdrop._tcp)
     S->>R: Hello (name, ephemeral X25519 pubkey)
     R-->>S: HelloAck (name, ephemeral X25519 pubkey)
-    Note over S,R: 2. Trust — both sides print the same SAS code (e.g. 7GKM-2XQ4)
+    Note over S,R: 2. Trust - both sides print the same SAS code (e.g. 7GKM-2XQ4)
     S->>R: Manifest (encrypted: file tree, sizes, BLAKE3 hashes)
     R-->>S: Ready | Abort (rejected by policy / user / trust mismatch)
-    loop 3. Transfer — per-chunk AEAD, pipelined
+    loop 3. Transfer - per-chunk AEAD, pipelined
         S->>R: DataFrame (ChaCha20-Poly1305, seq-numbered nonce)
         R-->>S: Ack
     end
@@ -230,20 +230,20 @@ live in `*.rustdrop-part` files and are never mistaken for finished data.
 
 **Protects against**
 
-- Passive LAN eavesdroppers — the payload is AEAD-encrypted, no plaintext on the wire.
-- Active man-in-the-middle — defeated by comparing the trust code (`--trust` pins it).
-- Offline brute-force of a captured session — a strong `--passphrase` raises the HKDF cost floor.
-- Tampered chunks — Poly1305 tags + end-to-end BLAKE3 hashes.
-- Half-written files — verify-then-rename, so a crashed transfer never poisons a directory.
+- Passive LAN eavesdroppers - the payload is AEAD-encrypted, no plaintext on the wire.
+- Active man-in-the-middle - defeated by comparing the trust code (`--trust` pins it).
+- Offline brute-force of a captured session - a strong `--passphrase` raises the HKDF cost floor.
+- Tampered chunks - Poly1305 tags + end-to-end BLAKE3 hashes.
+- Half-written files - verify-then-rename, so a crashed transfer never poisons a directory.
 
 **Out of scope**
 
 - A compromised endpoint (both ends must be trusted).
-- Traffic analysis (peers can see that a transfer happened, and how large it was — sizes are in the manifest).
+- Traffic analysis (peers can see that a transfer happened, and how large it was - sizes are in the manifest).
 - Filesystem-level access control on the receiving host.
 
 No analytics, no update checks, no DNS lookups, no persistence outside the
-transfer directory. `strace` it — the only sockets it opens are the mDNS
+transfer directory. `strace` it - the only sockets it opens are the mDNS
 multicast group and your transfer.
 
 ---
@@ -323,11 +323,11 @@ rustdrop list --timeout 5    # keep browsing longer
 |  | RustDrop | `scp` / `rsync` | cloud drive | chat app |
 | --- | --- | --- | --- | --- |
 | Works with no internet | ✅ | ✅ | ❌ | ❌ |
-| Zero-config peer discovery | ✅ mDNS | ❌ manual | — | ❌ |
-| MITM check without a CA | ✅ trust code | host keys | — | ❌ |
+| Zero-config peer discovery | ✅ mDNS | ❌ manual | - | ❌ |
+| MITM check without a CA | ✅ trust code | host keys | - | ❌ |
 | No account | ✅ | ✅ | ❌ | ❌ |
-| Single static binary | ✅ | ❌ | — | ❌ |
-| Rate limiting + compression | ✅ | partial | — | ❌ |
+| Single static binary | ✅ | ❌ | - | ❌ |
+| Rate limiting + compression | ✅ | partial | - | ❌ |
 
 ---
 
@@ -345,7 +345,7 @@ python3 demo/render.py demo-rec assets/demo.gif
 
 The end-to-end suite starts real TCP listeners on `127.0.0.1`, so it catches
 handshake, ordering, and teardown regressions that unit tests miss.
-Contributions welcome — open an issue first for anything larger than a fix.
+Contributions welcome - open an issue first for anything larger than a fix.
 
 ---
 
@@ -363,4 +363,4 @@ Contributions welcome — open an issue first for anything larger than a fix.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).

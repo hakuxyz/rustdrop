@@ -82,11 +82,10 @@ jobs:
       - name: Build (Android, cargo-ndk)
         if: matrix.android-abi
         env:
-          ANDROID_API: "24"
+          CARGO_NDK_PLATFORM: "24"
         run: |
           echo "NDK: ${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}"
-          find "${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}" -name 'libunwind.a' 2>/dev/null | head -3
-          cargo ndk -t ${{ matrix.android-abi }} -p $ANDROID_API build --release --locked
+          cargo ndk -t ${{ matrix.android-abi }} build --release --locked
 
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
