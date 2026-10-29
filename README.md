@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icon.svg" width="96" alt="RustDrop icon" />
+  <img src="https://raw.githubusercontent.com/hakuxyz/rustdrop/main/assets/icon.svg" width="96" alt="RustDrop icon" />
 </p>
 
 <h1 align="center">RustDrop</h1>
@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/demo.gif" alt="Terminal demo: rustdrop receiver and sender on a LAN" width="92%" />
+  <img src="https://raw.githubusercontent.com/hakuxyz/rustdrop/main/assets/demo.gif" alt="Terminal demo: rustdrop receiver and sender on a LAN" width="92%" />
 </p>
 
 <p align="center">

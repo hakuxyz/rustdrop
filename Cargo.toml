@@ -11,7 +11,7 @@ homepage = "https://github.com/hakuxyz/rustdrop"
 readme = "README.md"
 keywords = ["p2p", "file-transfer", "mdns", "encryption", "lan"]
 categories = ["command-line-utilities", "network-programming", "cryptography"]
-include = ["src/**/*", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE"]
+include = ["src/**/*", "tests/**/*", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE"]
 
 [dependencies]
 anyhow = "1.0.104"
