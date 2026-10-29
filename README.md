@@ -428,7 +428,7 @@ Contributions welcome - open an issue first for anything larger than a fix.
 - [x] Directory sync mode (`--watch`)
 - [x] QR-code pairing for passphrase bootstrap
 - [x] Android binaries for Termux
-- [ ] iOS companion app (needs macOS/Xcode, tracked in issues)
+- [ ] iOS companion app (needs macOS/Xcode, see #1)
 
 ---
 
