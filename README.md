@@ -13,6 +13,7 @@
   <a href="https://github.com/hakuxyz/rustdrop/actions/workflows/ci.yml"><img src="https://github.com/hakuxyz/rustdrop/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/hakuxyz/rustdrop/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://crates.io/crates/rustdrop"><img src="https://img.shields.io/crates/v/rustdrop.svg" alt="crates.io" /></a>
+  <a href="https://docs.rs/rustdrop"><img src="https://docs.rs/badge/rustdrop/latest.svg" alt="docs.rs" /></a>
   <a href="https://github.com/hakuxyz/rustdrop/releases/latest"><img src="https://img.shields.io/github/downloads/hakuxyz/rustdrop/total.svg" alt="Downloads" /></a>
   <img src="https://img.shields.io/badge/MSRV-1.88-blue.svg" alt="MSRV 1.88" />
   <img src="https://img.shields.io/badge/rust-2024-orange.svg" alt="Rust 2024 edition" />
