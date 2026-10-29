@@ -18,6 +18,7 @@ use crate::transfer::{
 };
 
 /// Everything the sender needs to run one transfer.
+#[derive(Clone)]
 pub struct SendRequest {
     pub paths: Vec<PathBuf>,
     /// Candidate endpoints (from `--to`, or resolved via mDNS).
@@ -37,6 +38,12 @@ pub struct SendRequest {
     /// Optional send-rate cap in bytes/second.
     pub limit_bps: Option<u64>,
     pub excludes: Vec<String>,
+    /// Restrict the session to these (already canonical) source paths.
+    ///
+    /// Layout is unchanged: entries keep the names they would have had
+    /// under the full input set. Used by `send --watch` to push only the
+    /// files that changed since the last session.
+    pub only: Option<Vec<PathBuf>>,
 }
 
 impl Default for SendRequest {
@@ -54,6 +61,7 @@ impl Default for SendRequest {
             compress: false,
             limit_bps: None,
             excludes: Vec::new(),
+            only: None,
         }
     }
 }
@@ -67,7 +75,17 @@ pub async fn send(req: SendRequest, progress: &dyn ProgressSink) -> Result<Trans
         )));
     }
 
-    let (files, manifest) = collect_files_filtered(&req.paths, &req.excludes)?;
+    let (mut files, mut manifest) = collect_files_filtered(&req.paths, &req.excludes)?;
+    if let Some(only) = &req.only {
+        files.retain(|f| only.contains(&f.source));
+        if files.is_empty() {
+            return Err(RustDropError::Protocol(
+                "the per-session file filter matched nothing".into(),
+            ));
+        }
+        manifest.total_bytes = files.iter().map(|f| f.entry.size).sum();
+        manifest.files = files.iter().map(|f| f.entry.clone()).collect();
+    }
     progress.status(&format!(
         "preparing {} file(s) ({})",
         files.len(),
@@ -87,14 +105,22 @@ pub async fn send(req: SendRequest, progress: &dyn ProgressSink) -> Result<Trans
     write_frame(&mut stream, &sealed).await?;
 
     let mut ack_channel = data_channel_key.ack_channel();
-    match wait_ack(&mut stream, &mut ack_channel, req.handshake_timeout).await? {
-        Ack::Ready { .. } => {}
-        Ack::Abort { reason } => return Err(RustDropError::Rejected(reason)),
-        Ack::Complete { .. } => {
-            return Err(RustDropError::Protocol(
-                "receiver completed before any data was sent".into(),
-            ));
-        }
+    let resume_offsets =
+        match wait_ack(&mut stream, &mut ack_channel, req.handshake_timeout).await? {
+            Ack::Ready { resume, .. } => resume,
+            Ack::Abort { reason } => return Err(RustDropError::Rejected(reason)),
+            Ack::Complete { .. } => {
+                return Err(RustDropError::Protocol(
+                    "receiver completed before any data was sent".into(),
+                ));
+            }
+        };
+    let resumed: u64 = resume_offsets.iter().sum();
+    if resumed > 0 {
+        progress.status(&format!(
+            "skipping {} the receiver already has",
+            human_bytes(resumed)
+        ));
     }
 
     // ---- stream ---------------------------------------------------------
@@ -106,12 +132,14 @@ pub async fn send(req: SendRequest, progress: &dyn ProgressSink) -> Result<Trans
     let mut frame_buf: Vec<u8> = Vec::with_capacity(req.chunk_size + 64);
     for (index, file) in files.iter().enumerate() {
         progress.file(&file.entry.path, file.entry.size);
+        let have = resume_offsets.get(index).copied().unwrap_or(0);
         stream_file(
             &mut stream,
             &mut data_channel,
             &mut limiter,
             file,
             index as u32,
+            have,
             req.compress,
             &mut plaintext,
             &mut frame_buf,
@@ -236,6 +264,7 @@ async fn stream_file(
     limiter: &mut Option<RateLimiter>,
     file: &crate::transfer::LocalFile,
     index: u32,
+    resume_at: u64,
     compress: bool,
     plaintext: &mut [u8],
     frame_buf: &mut Vec<u8>,
@@ -254,8 +283,27 @@ async fn stream_file(
         )));
     }
 
+    // The receiver only needs bytes it does not have yet, but both sides
+    // hash from offset 0 so the BLAKE3 digest always covers the whole file.
     let mut hasher = blake3::Hasher::new();
-    let mut offset: u64 = 0;
+    let resume_at = resume_at.min(file.entry.size);
+    if resume_at > 0 {
+        let mut left = resume_at;
+        while left > 0 {
+            let take = left.min(plaintext.len() as u64) as usize;
+            let n = fill(&mut source, &mut plaintext[..take]).await?;
+            if n == 0 {
+                return Err(RustDropError::Protocol(format!(
+                    "'{}' shrank while seeking to the resume point",
+                    file.entry.path
+                )));
+            }
+            hasher.update(&plaintext[..n]);
+            left -= n as u64;
+        }
+        progress.advance(resume_at);
+    }
+    let mut offset: u64 = resume_at;
 
     loop {
         let n = fill(&mut source, plaintext).await?;

@@ -212,7 +212,16 @@ impl Manifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Ack {
     /// Manifest validated, receiver is ready for bytes.
-    Ready { files: usize, bytes: u64 },
+    ///
+    /// `resume[i]` is how many plaintext bytes of file `i` the receiver
+    /// already holds in its `.rustdrop-part` file (all zeros without
+    /// `--resume`). The sender may skip those bytes; BLAKE3 verification
+    /// still covers the whole file because both sides hash from offset 0.
+    Ready {
+        files: usize,
+        bytes: u64,
+        resume: Vec<u64>,
+    },
     /// Transfer finished successfully.
     Complete { files: usize, bytes: u64 },
     /// Something went wrong; the sender aborts with `RustDropError::Rejected`.

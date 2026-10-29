@@ -15,5 +15,6 @@ async fn main() -> anyhow::Result<()> {
         Command::Receive(args) => rustdrop::commands::receive(args, verbose, quiet).await,
         Command::List(args) => rustdrop::commands::list(args, verbose, quiet).await,
         Command::Completions(args) => rustdrop::commands::completions(args),
+        Command::Pair(args) => rustdrop::commands::pair(args, verbose, quiet),
     }
 }

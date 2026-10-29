@@ -1,12 +1,15 @@
 //! Command handlers – the glue between [`crate::cli`] and the core library.
 
+use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::cli::{CompletionsArgs, ListArgs, ReceiveArgs, SendArgs};
+use crate::cli::{CompletionsArgs, ListArgs, PairArgs, ReceiveArgs, SendArgs};
 use crate::discovery::{self, Announcement, DiscoveredReceiver};
 use crate::protocol::Manifest;
 use crate::transfer::receiver::{ConfirmFn, ReceiveRequest, Receiver, TransferPreview};
@@ -48,7 +51,12 @@ pub async fn send(args: SendArgs, verbose: bool, quiet: bool) -> Result<()> {
         compress: args.compress,
         limit_bps,
         excludes: args.exclude.clone(),
+        only: None,
     };
+
+    if args.watch {
+        return watch_loop(&args, &request, &progress).await;
+    }
 
     let report = crate::transfer::sender::send(request, &progress).await?;
 
@@ -67,6 +75,200 @@ pub async fn send(args: SendArgs, verbose: bool, quiet: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// `rustdrop pair`
+///
+/// Generates a fresh passphrase (or encodes `--show` text) and renders it
+/// as text plus a terminal QR code, so a phone can scan the code off this
+/// screen and paste the same string into `send -p` / `receive -p`.
+pub fn pair(args: PairArgs, verbose: bool, quiet: bool) -> Result<()> {
+    let progress = CliProgress::new(quiet, verbose);
+
+    let (payload, passphrase) = match &args.show {
+        Some(text) => (text.clone(), None),
+        None => {
+            let code = generate_pairing_code().context("no secure random source")?;
+            (code.clone(), Some(code))
+        }
+    };
+    let qr = crate::ui::render_qr_ansi(&payload).context("QR payload")?;
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "role": "pair",
+                "passphrase": passphrase,
+                "payload": payload,
+            })
+        );
+        return Ok(());
+    }
+
+    match &passphrase {
+        Some(code) => {
+            progress.security_line(&format!("pairing code: {code}"));
+            progress.security_line(
+                "next: pass it via -p to both `send` and `receive` (or scan the QR)",
+            );
+        }
+        None => progress.line(&format!("encoding: {payload}")),
+    }
+
+    if !quiet && std::io::stderr().is_terminal() {
+        for line in qr.lines() {
+            progress.line(line);
+        }
+    }
+    Ok(())
+}
+
+/// RFC 4648 base32 without padding (12 bytes -> exactly 20 characters).
+fn base32_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut out = String::with_capacity(data.len().div_ceil(5) * 8);
+    let mut bits: u32 = 0;
+    let mut value: u32 = 0;
+    for &byte in data {
+        value = (value << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(ALPHABET[((value >> bits) & 31) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        out.push(ALPHABET[((value << (5 - bits)) & 31) as usize] as char);
+    }
+    out
+}
+
+/// `ABCDEF...` -> `ABCD-EFGH-...` for easy reading and scanning.
+fn group_code(raw: &str) -> String {
+    raw.as_bytes()
+        .chunks(4)
+        .map(|chunk| std::str::from_utf8(chunk).expect("ascii code"))
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// 96 bits of OS entropy as a grouped base32 pairing code.
+fn generate_pairing_code() -> Result<String> {
+    let mut raw = [0u8; 12];
+    getrandom::fill(&mut raw)?;
+    Ok(group_code(&base32_encode(&raw)))
+}
+
+/// Poll the inputs and push additions/modifications as fresh sessions.
+///
+/// The receiver keeps running with `--keep-open`; deletions are never
+/// mirrored. The first poll sends everything (that is the initial transfer),
+/// later polls only touch files whose (size, mtime) changed.
+async fn watch_loop(args: &SendArgs, base: &SendRequest, progress: &CliProgress) -> Result<()> {
+    let interval = Duration::from_secs(args.interval.max(1));
+    let mut known: HashMap<PathBuf, (u64, u64)> = HashMap::new();
+    let mut session: u64 = 0;
+    let mut validated = false;
+
+    progress.status(&format!(
+        "watching {} input(s) every {}s (Ctrl-C to stop; receiver needs --keep-open)",
+        args.paths.len(),
+        interval.as_secs()
+    ));
+
+    loop {
+        match watch_poll(args, base, &mut known, &mut session, progress).await {
+            Ok(()) => validated = true,
+            // Configuration errors (bad glob, missing path) fail fast;
+            // transient ones (receiver down, file vanished) retry next poll.
+            Err(e) if !validated => return Err(e),
+            Err(e) => progress.status(&format!("watch iteration failed: {e}; retrying")),
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// One watch poll: diff snapshots, send changed files, update `known`.
+async fn watch_poll(
+    args: &SendArgs,
+    base: &SendRequest,
+    known: &mut HashMap<PathBuf, (u64, u64)>,
+    session: &mut u64,
+    progress: &CliProgress,
+) -> Result<()> {
+    let (files, _manifest) = collect_files_filtered(&args.paths, &args.exclude)?;
+    let snapshot: HashMap<PathBuf, (u64, u64)> = files
+        .iter()
+        .map(|f| (f.source.clone(), (f.entry.size, f.entry.mtime)))
+        .collect();
+
+    let changed = changed_since(&snapshot, known);
+
+    if changed.is_empty() {
+        *known = snapshot;
+        return Ok(());
+    }
+
+    *session += 1;
+    let request = SendRequest {
+        only: Some(changed.clone()),
+        ..base.clone()
+    };
+
+    match crate::transfer::sender::send(request, progress).await {
+        Ok(report) => {
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "role": "sender",
+                        "watch_session": session,
+                        "peer": report.peer,
+                        "files": report.files,
+                        "bytes": report.bytes,
+                        "elapsed_secs": report.elapsed.as_secs_f64(),
+                        "mbps": report.mbps(),
+                    })
+                );
+            }
+            *known = snapshot;
+            Ok(())
+        }
+        Err(e) => {
+            progress.status(&format!("watch session {session} failed: {e} (will retry)"));
+            // Keep the old keys for the failed files so they are retried.
+            for src in &changed {
+                match known.get(src) {
+                    Some(old) => {
+                        known.insert(src.clone(), *old);
+                    }
+                    None => {
+                        known.remove(src);
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Sources in `snapshot` that are new or whose (size, mtime) differs from
+/// the last delivered state. Files only in `known` (deleted locally) are
+/// simply forgotten: watch mode never mirrors deletions.
+fn changed_since(
+    snapshot: &HashMap<PathBuf, (u64, u64)>,
+    known: &HashMap<PathBuf, (u64, u64)>,
+) -> Vec<PathBuf> {
+    let mut changed: Vec<PathBuf> = snapshot
+        .iter()
+        .filter(|(src, key)| known.get(*src).is_none_or(|old| old != *key))
+        .map(|(src, _)| src.clone())
+        .collect();
+    changed.sort();
+    changed
 }
 
 /// `rustdrop receive`
@@ -111,6 +313,7 @@ pub async fn receive(args: ReceiveArgs, verbose: bool, quiet: bool) -> Result<()
         confirm,
         keep_open: args.keep_open,
         no_clobber: args.no_clobber,
+        resume: args.resume,
         preserve_attrs: !args.no_preserve_time,
         wait_timeout: if args.timeout == 0 {
             None
@@ -354,5 +557,90 @@ mod tests {
         assert_eq!(truncate("abc", 10), "abc");
         assert_eq!(truncate("abcdefghij", 5), "abcd…");
         assert_eq!(truncate("übermäßig", 5).chars().count(), 5);
+    }
+
+    #[test]
+    fn base32_matches_rfc4648_vectors() {
+        assert_eq!(base32_encode(b""), "");
+        assert_eq!(base32_encode(b"f"), "MY");
+        assert_eq!(base32_encode(b"fo"), "MZXQ");
+        assert_eq!(base32_encode(b"foo"), "MZXW6");
+        assert_eq!(base32_encode(b"foobar"), "MZXW6YTBOI");
+    }
+
+    #[test]
+    fn pairing_codes_are_grouped_and_scannable() {
+        let code = generate_pairing_code().expect("os rng");
+        assert_eq!(code.len(), 24, "20 chars in five groups of four");
+        assert_eq!(code.matches('-').count(), 4);
+        let raw: String = code.chars().filter(|&c| c != '-').collect();
+        assert_eq!(raw.len(), 20);
+        assert!(
+            raw.chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
+            "base32 alphabet only: {raw}"
+        );
+        assert_ne!(generate_pairing_code().unwrap(), code, "codes are fresh");
+    }
+
+    #[test]
+    fn grouping_splits_evenly() {
+        assert_eq!(group_code("ABCDEFGH"), "ABCD-EFGH");
+        assert_eq!(group_code("ABCDEFGHIJK"), "ABCD-EFGH-IJK");
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::*;
+
+    fn entry(size: u64, mtime: u64) -> (u64, u64) {
+        (size, mtime)
+    }
+
+    #[test]
+    fn diff_reports_new_and_changed_but_not_unchanged_or_gone() {
+        let a = PathBuf::from("/a");
+        let b = PathBuf::from("/b");
+        let c = PathBuf::from("/c");
+        let gone = PathBuf::from("/gone");
+
+        let mut known = HashMap::new();
+        known.insert(a.clone(), entry(10, 1));
+        known.insert(b.clone(), entry(20, 2));
+        known.insert(gone.clone(), entry(5, 5));
+
+        let mut snapshot = HashMap::new();
+        snapshot.insert(a.clone(), entry(10, 1)); // untouched
+        snapshot.insert(b.clone(), entry(20, 9)); // mtime moved
+        snapshot.insert(c.clone(), entry(30, 3)); // brand new
+        // `gone` deleted locally: dropped from the snapshot entirely
+
+        let changed = changed_since(&snapshot, &known);
+        assert_eq!(changed, vec![b, c], "changed is sorted and diff-only");
+
+        // After delivery the snapshot becomes the new baseline...
+        known = snapshot.clone();
+        assert!(changed_since(&known, &known).is_empty());
+
+        // ...and a file deleted then recreated with new metadata resurfaces.
+        snapshot.insert(gone, entry(6, 6));
+        assert_eq!(
+            changed_since(&snapshot, &known),
+            vec![PathBuf::from("/gone")]
+        );
+    }
+
+    #[test]
+    fn first_poll_reports_everything() {
+        let snapshot = HashMap::from([
+            (PathBuf::from("/a"), entry(1, 1)),
+            (PathBuf::from("/b"), entry(2, 2)),
+        ]);
+        let known = HashMap::new();
+        assert_eq!(
+            changed_since(&snapshot, &known),
+            vec![PathBuf::from("/a"), PathBuf::from("/b")]
+        );
     }
 }

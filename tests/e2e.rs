@@ -416,3 +416,220 @@ fn send_fails_cleanly_when_discovery_finds_nothing() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("panicked"), "{stderr}");
 }
+
+#[tokio::test]
+async fn resume_continues_a_partial_download() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+
+    let payload: Vec<u8> = (0..300_000u32)
+        .map(|i| i.wrapping_mul(7) % 251)
+        .map(|i| i as u8)
+        .collect();
+    let source_file = src.path().join("payload.bin");
+    std::fs::write(&source_file, &payload).unwrap();
+
+    // Simulate an interrupted transfer: 123_456 bytes already on disk.
+    let have = 123_456usize;
+    let part = dst.path().join("payload.bin.rustdrop-part");
+    std::fs::write(&part, &payload[..have]).unwrap();
+
+    let mut request = receiver_request(dst.path());
+    request.resume = true;
+    let (addr, handle) = spawn_receiver(request).await;
+
+    let report = send(sender_request(vec![source_file], addr), &NullProgress)
+        .await
+        .expect("send");
+    assert_eq!(
+        report.bytes,
+        (payload.len() - have) as u64,
+        "sender must skip the prefix the receiver already holds"
+    );
+
+    assert_eq!(read(&dst.path().join("payload.bin")), payload);
+    assert!(!part.exists(), "part file must be renamed away");
+    let reports = handle.await.unwrap().expect("receive");
+    assert_eq!(reports[0].bytes, (payload.len() - have) as u64);
+}
+
+#[tokio::test]
+async fn resume_restarts_when_the_leftover_cannot_belong() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+
+    let payload: Vec<u8> = (0..40_000u32).map(|i| (i % 249) as u8).collect();
+    let source_file = src.path().join("payload.bin");
+    std::fs::write(&source_file, &payload).unwrap();
+
+    // Leftover larger than the manifest entry: must be discarded, not trusted.
+    let part = dst.path().join("payload.bin.rustdrop-part");
+    std::fs::write(&part, vec![0u8; payload.len() + 999]).unwrap();
+
+    let mut request = receiver_request(dst.path());
+    request.resume = true;
+    let (addr, handle) = spawn_receiver(request).await;
+
+    let report = send(sender_request(vec![source_file], addr), &NullProgress)
+        .await
+        .expect("send");
+    assert_eq!(report.bytes, payload.len() as u64, "full re-send expected");
+
+    assert_eq!(read(&dst.path().join("payload.bin")), payload);
+    handle.await.unwrap().expect("receive");
+}
+
+#[tokio::test]
+async fn resume_of_a_complete_part_writes_no_bytes() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+
+    let payload: Vec<u8> = (0..20_000u32)
+        .map(|i| (i.wrapping_mul(3) % 250) as u8)
+        .collect();
+    let source_file = src.path().join("payload.bin");
+    std::fs::write(&source_file, &payload).unwrap();
+
+    let part = dst.path().join("payload.bin.rustdrop-part");
+    std::fs::write(&part, &payload).unwrap();
+
+    let mut request = receiver_request(dst.path());
+    request.resume = true;
+    let (addr, handle) = spawn_receiver(request).await;
+
+    let report = send(sender_request(vec![source_file], addr), &NullProgress)
+        .await
+        .expect("send");
+    assert_eq!(report.bytes, 0, "everything already present: rename only");
+
+    assert_eq!(read(&dst.path().join("payload.bin")), payload);
+    handle.await.unwrap().expect("receive");
+}
+
+#[tokio::test]
+async fn session_filter_sends_only_requested_files() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+
+    let keep = src.path().join("keep.txt");
+    let picked = src.path().join("picked.txt");
+    std::fs::write(&keep, b"stay put").unwrap();
+    std::fs::write(&picked, b"payload").unwrap();
+
+    let (addr, handle) = spawn_receiver(receiver_request(dst.path())).await;
+
+    // Full input set, but the session is restricted to `picked.txt`.
+    let mut request = sender_request(vec![keep.clone(), picked.clone()], addr);
+    request.only = Some(vec![picked.canonicalize().unwrap()]);
+    let report = send(request, &NullProgress).await.expect("send");
+
+    assert_eq!(report.files, 1);
+    assert_eq!(read(&dst.path().join("picked.txt")), b"payload");
+    assert!(
+        !dst.path().join("keep.txt").exists(),
+        "files outside the filter must not cross the wire"
+    );
+
+    handle.await.unwrap().expect("receive");
+}
+
+/// A live `send --watch` child process against a keep-open receiver:
+/// initial transfer, then an added file, then a modified file.
+#[test]
+fn watch_loop_sends_new_and_changed_files() {
+    use std::time::Instant;
+
+    struct KillChild(std::process::Child);
+    impl Drop for KillChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn wait_for(what: &str, timeout: Duration, mut cond: impl FnMut() -> bool) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if cond() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("first.txt"), b"one").unwrap();
+
+    // Multi-thread runtime: it keeps driving the receiver while this thread
+    // polls the filesystem and supervises the sender child process.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (addr, rx_task) = rt.block_on(async {
+        let receiver = rustdrop::transfer::receiver::Receiver::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind");
+        let addr = receiver.local_addr().expect("local addr");
+        let request = ReceiveRequest {
+            out_dir: dst.path().to_path_buf(),
+            wait_timeout: Some(Duration::from_secs(60)),
+            handshake_timeout: Duration::from_secs(10),
+            keep_open: true,
+            ..ReceiveRequest::default()
+        };
+        let task = tokio::spawn(async move { receiver.run(request, &NullProgress).await });
+        (addr, task)
+    });
+
+    let mut sender = KillChild(
+        std::process::Command::new(bin())
+            .args([
+                "send",
+                "--watch",
+                "--interval",
+                "1",
+                "--to",
+                &addr.to_string(),
+                "--quiet",
+            ])
+            .arg(src.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn watch sender"),
+    );
+
+    // Entries keep their input layout: `<dst>/<src-dir-name>/<file>`.
+    let landed = |name: &str| {
+        dst.path()
+            .join(src.path().file_name().expect("src dir name"))
+            .join(name)
+    };
+    let get = |name: &str| -> Vec<u8> { std::fs::read(landed(name)).unwrap_or_default() };
+
+    // 1) first poll transfers the initial snapshot.
+    wait_for("initial file", Duration::from_secs(20), || {
+        get("first.txt") == b"one"
+    });
+
+    // 2) a new file appears at the next poll.
+    std::fs::write(src.path().join("second.txt"), b"two").unwrap();
+    wait_for("added file", Duration::from_secs(20), || {
+        get("second.txt") == b"two"
+    });
+
+    // 3) a changed file is re-sent (size grows, so the diff cannot miss it).
+    std::fs::write(src.path().join("first.txt"), b"one plus edits").unwrap();
+    wait_for("modified file", Duration::from_secs(20), || {
+        get("first.txt") == b"one plus edits"
+    });
+
+    // Sender must still be running (watch mode never exits on its own).
+    assert!(
+        sender.0.try_wait().unwrap().is_none(),
+        "watch sender exited early"
+    );
+
+    drop(sender);
+    rt.block_on(async { rx_task.abort() });
+}

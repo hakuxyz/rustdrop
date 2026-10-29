@@ -56,7 +56,7 @@ print the same **trust code**, and the file lands verified and encrypted.
 | **Actually fast** | ~400 MiB/s measured on real hardware (see [Performance](#performance)). Fully pipelined, `tokio`-powered, zero-copy chunking. |
 | **Pretty** | Multi-progress bars per file + overall, per-chunk rate, ETA, trust-code prompts. |
 | **Scriptable** | `--json` summaries, `--quiet`, `--yes`, `--dry-run`, shell completions. |
-| **One static binary** | Single static file, no runtime deps, 3.5 MB, ships on Linux (glibc/musl), macOS (Intel/ARM), Windows. |
+| **One static binary** | Single static file, no runtime deps, 3.5 MB, ships on Linux (glibc/musl), macOS (Intel/ARM), Windows and Android (Termux). |
 
 ---
 
@@ -102,6 +102,25 @@ tar -xzf rustdrop.tar.gz && sudo install rustdrop-${VER}-x86_64-unknown-linux-mu
 | `aarch64-unknown-linux-gnu` | Raspberry Pi 64-bit, ARM servers |
 | `x86_64-apple-darwin`, `aarch64-apple-darwin` | macOS Intel / Apple Silicon |
 | `x86_64-pc-windows-msvc` | Windows 10+ |
+| `aarch64-linux-android`, `armv7-linux-androideabi` | Android, via Termux |
+
+### Android (Termux)
+
+Grab the Android archive from the
+[releases page](https://github.com/hakuxyz/rustdrop/releases/latest)
+(`aarch64-linux-android` for most phones, `armv7-linux-androideabi` for old
+32-bit devices) and unpack it inside Termux:
+
+```bash
+tar -xzf rustdrop-*-aarch64-linux-android.tar.gz
+install -D rustdrop-*/rustdrop ~/.local/bin/rustdrop
+
+# phone -> PC in one line
+rustdrop send --to 192.168.1.10:9000 ~/storage/downloads/photo.jpg
+```
+
+Everything else works the same as on the desktop - discovery, trust codes,
+`--resume`, `--json`.
 
 ### From source
 
@@ -170,14 +189,48 @@ rustdrop send --dry-run --exclude '**/*.log' --exclude '**/node_modules/**' --li
 rustdrop send --compress --limit 24M --exclude '**/*.log' ./project
 ```
 
-### 6. Scripting & CI
+### 6. Resume an interrupted transfer
+
+```bash
+# receiver: pick up where the *.rustdrop-part file left off
+rustdrop receive -o downloads --resume
+```
+
+Half-finished `*.rustdrop-part` files are verified and continued: the sender
+skips the bytes already on disk while BLAKE3 still covers the whole file. A
+leftover that cannot belong to the file simply restarts that one file.
+
+### 7. Keep a directory in sync
+
+```bash
+# receiver stays up; sender polls and pushes only what changed
+rustdrop receive -o backup --keep-open --yes
+rustdrop send --watch --interval 2 ~/projects/
+```
+
+Every poll is a fresh session containing only new or modified files
+(deletions are never mirrored). Add `--watch --json` to get one JSON line per
+session.
+
+### 8. Pair by QR code
+
+```bash
+rustdrop pair                             # fresh passphrase + QR on screen
+rustdrop pair --json | jq -r .passphrase  # same code, machine-readable
+rustdrop pair --show 'rustdrop://192.168.1.10:9000'  # any text as a QR
+```
+
+Scan the code with a phone and pass the same string via `-p` on both sides -
+offline pairing with no typing errors and no cloud in between.
+
+### 9. Scripting & CI
 
 ```bash
 rustdrop send --json --quiet ./artifact.tar.zst | jq '.files, .mbps'
 rustdrop receive -o /srv/incoming --yes --no-clobber --json --keep-open
 ```
 
-### 7. Shell completions
+### 10. Shell completions
 
 ```bash
 source <(rustdrop completions bash)   # bash
@@ -283,6 +336,8 @@ not collapse on huge files.
 | `--compress` | Deflate chunks when that actually shrinks them |
 | `--limit <RATE>` | Cap the send rate, e.g. `10M`, `512K`, `1.5M` |
 | `--exclude <GLOB>` | Skip files matching `GLOB` (repeatable) |
+| `--watch` | Poll the inputs and re-send new/changed files *(receiver: `--keep-open`)* |
+| `--interval <SECS>` | Seconds between watch-mode polls *(default: 2, requires `--watch`)* |
 | `--dry-run` | Show what would be sent, then exit |
 | `--json` | Machine-readable summary on stdout |
 | `-q, --quiet` / `-v, --verbose` | Less / more output |
@@ -299,10 +354,24 @@ not collapse on huge files.
 | `-y, --yes` | Accept every transfer without asking |
 | `--keep-open` | Keep listening for more senders after each transfer |
 | `--no-clobber` | Refuse files that already exist |
+| `--resume` | Continue `*.rustdrop-part` files from an interrupted transfer |
 | `--no-preserve-time` | Do not restore modification times |
 | `--no-mdns` | Skip mDNS announcement |
 | `--timeout <SECS>` | Wait for a sender *(idle timeout with `--keep-open`, `0` = forever, default: 600)* |
 | `--json` | Machine-readable summary on stdout |
+
+### `rustdrop pair`
+
+```bash
+rustdrop pair                 # generate a pairing code and show it as text + QR
+rustdrop pair --show <TEXT>   # encode arbitrary text (a URL, a command) instead
+rustdrop pair --json          # {"ok":true,"role":"pair","passphrase":"..."}
+```
+
+| Flag | Description |
+| --- | --- |
+| `--show <TEXT>` | Encode this text into the QR instead of generating a passphrase |
+| `--json` | Emit the pairing code as JSON on stdout |
 
 ### `rustdrop list`
 
@@ -335,7 +404,7 @@ rustdrop list --timeout 5    # keep browsing longer
 
 ```bash
 cargo build --all-targets
-cargo test --all-targets          # 49 unit + 16 end-to-end tests
+cargo test --all-targets          # 57 unit + 21 end-to-end tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
 
@@ -354,10 +423,11 @@ Contributions welcome - open an issue first for anything larger than a fix.
 - [x] mDNS discovery, trust codes, passphrase hardening
 - [x] Compression, rate limiting, excludes, resume-safe temp files
 - [x] `--json`, completions, keep-open mode, dry-run
-- [ ] Chunk-level resume across sessions (`--resume`)
-- [ ] Directory sync mode (`--watch`)
-- [ ] QR-code pairing for passphrase bootstrap
-- [ ] Android / iOS companion apps
+- [x] Chunk-level resume across sessions (`--resume`)
+- [x] Directory sync mode (`--watch`)
+- [x] QR-code pairing for passphrase bootstrap
+- [x] Android binaries for Termux
+- [ ] iOS companion app (needs macOS/Xcode, tracked in issues)
 
 ---
 

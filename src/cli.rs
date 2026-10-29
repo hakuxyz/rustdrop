@@ -49,6 +49,20 @@ pub enum Command {
 
     /// Print a shell completion script
     Completions(CompletionsArgs),
+
+    /// Generate a pairing code (and a scannable QR) for shared -p passphrases
+    Pair(PairArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PairArgs {
+    /// Encode this text into the QR instead of generating a passphrase
+    #[arg(long, value_name = "TEXT")]
+    pub show: Option<String>,
+
+    /// Emit a machine-readable JSON summary on stdout
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -113,6 +127,15 @@ pub struct SendArgs {
     /// Emit a machine-readable JSON summary on stdout
     #[arg(long)]
     pub json: bool,
+
+    /// Keep polling the inputs and re-send new or changed files
+    /// (the receiver should run with --keep-open)
+    #[arg(long)]
+    pub watch: bool,
+
+    /// Seconds between watch-mode polls
+    #[arg(long, default_value_t = 2, value_name = "SECS", requires = "watch")]
+    pub interval: u64,
 }
 
 #[derive(Debug, Args)]
@@ -148,6 +171,10 @@ pub struct ReceiveArgs {
     /// Refuse files that already exist instead of overwriting them
     #[arg(long)]
     pub no_clobber: bool,
+
+    /// Continue .rustdrop-part files left by an interrupted transfer
+    #[arg(long)]
+    pub resume: bool,
 
     /// Do not restore modification times on received files
     #[arg(long)]

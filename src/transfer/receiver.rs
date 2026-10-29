@@ -45,6 +45,8 @@ pub struct ReceiveRequest {
     pub keep_open: bool,
     /// Refuse (rather than overwrite) destinations that already exist.
     pub no_clobber: bool,
+    /// Continue `.rustdrop-part` files left behind by an earlier attempt.
+    pub resume: bool,
     /// Restore mtime/permissions on written files.
     pub preserve_attrs: bool,
     /// How long to wait for a sender before giving up.
@@ -66,6 +68,7 @@ impl Default for ReceiveRequest {
             confirm: None,
             keep_open: false,
             no_clobber: false,
+            resume: false,
             preserve_attrs: true,
             wait_timeout: Some(Duration::from_secs(600)),
             handshake_timeout: Duration::from_secs(30),
@@ -287,9 +290,34 @@ impl Receiver {
             }
         }
 
+        // ---- resume offsets ----------------------------------------------
+        let mut resume_offsets = vec![0u64; manifest.files.len()];
+        if req.resume {
+            let mut salvaged = 0u64;
+            for (i, (entry, dest)) in manifest.files.iter().zip(destinations.iter()).enumerate() {
+                let have = tokio::fs::metadata(tmp_path(dest))
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                // Leftovers bigger than the manifest entry cannot belong to
+                // this file; restart that one instead of poisoning it.
+                if have > 0 && have <= entry.size {
+                    resume_offsets[i] = have;
+                    salvaged += have;
+                }
+            }
+            if salvaged > 0 {
+                progress.status(&format!(
+                    "resuming {} from a previous attempt",
+                    human_bytes(salvaged)
+                ));
+            }
+        }
+
         let ready = Ack::Ready {
             files: manifest.files.len(),
             bytes: manifest.total_bytes,
+            resume: resume_offsets.clone(),
         };
         write_frame(&mut stream, &ack_channel.seal(&ready.encode()?)?).await?;
 
@@ -297,7 +325,7 @@ impl Receiver {
         progress.begin(manifest.files.len(), manifest.total_bytes);
         let started = std::time::Instant::now();
         let mut data_channel = keys.data_channel();
-        let mut session = WriteSession::new(destinations.clone());
+        let mut session = WriteSession::new(destinations.clone(), resume_offsets);
 
         let outcome = receive_data(
             &mut stream,
@@ -395,6 +423,8 @@ struct WriteSession {
     finished: usize,
     tmp_paths: Vec<PathBuf>,
     destinations: Vec<PathBuf>,
+    /// Bytes already on disk per file index (`--resume`).
+    resume: Vec<u64>,
     total_written: u64,
     complete: bool,
 }
@@ -409,13 +439,14 @@ struct OpenFile {
 }
 
 impl WriteSession {
-    fn new(destinations: Vec<PathBuf>) -> Self {
+    fn new(destinations: Vec<PathBuf>, resume: Vec<u64>) -> Self {
         Self {
             current: None,
             next_index: 0,
             finished: 0,
             tmp_paths: Vec::new(),
             destinations,
+            resume,
             total_written: 0,
             complete: false,
         }
@@ -433,20 +464,25 @@ impl WriteSession {
         payload: &[u8],
         progress: &dyn ProgressSink,
     ) -> Result<()> {
-        self.ensure_open(manifest, index).await?;
+        self.ensure_open(manifest, index, progress).await?;
 
         let open = self
             .current
             .as_mut()
             .ok_or_else(|| RustDropError::Protocol("no open file".into()))?;
 
-        if offset != open.received {
-            return Err(RustDropError::Protocol(format!(
-                "'{}': out-of-order chunk at offset {offset} (expected {})",
-                open.entry.path, open.received
-            )));
-        }
+        let start = match chunk_tail(offset, payload.len(), open.received) {
+            Ok(Some(start)) => start,
+            Ok(None) => return Ok(()), // only bytes we already hold
+            Err(_) => {
+                return Err(RustDropError::Protocol(format!(
+                    "'{}': out-of-order chunk at offset {offset} (expected {})",
+                    open.entry.path, open.received
+                )));
+            }
+        };
 
+        let payload = &payload[start..];
         use tokio::io::AsyncWriteExt;
         open.file.write_all(payload).await?;
         open.hasher.update(payload);
@@ -463,7 +499,7 @@ impl WriteSession {
         expected_hash: &[u8; 32],
         progress: &dyn ProgressSink,
     ) -> Result<()> {
-        self.ensure_open(manifest, index).await?;
+        self.ensure_open(manifest, index, progress).await?;
 
         let mut open = self
             .current
@@ -515,7 +551,12 @@ impl WriteSession {
     }
 
     /// Open `manifest.files[index]` if it is not the current file.
-    async fn ensure_open(&mut self, manifest: &Manifest, index: u32) -> Result<()> {
+    async fn ensure_open(
+        &mut self,
+        manifest: &Manifest,
+        index: u32,
+        progress: &dyn ProgressSink,
+    ) -> Result<()> {
         if let Some(open) = &self.current {
             if open.index == index {
                 return Ok(());
@@ -540,7 +581,42 @@ impl WriteSession {
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let file = tokio::fs::File::create(&tmp).await?;
+
+        let resume_at = self.resume.get(index as usize).copied().unwrap_or(0);
+        let mut file = if resume_at > 0 {
+            tokio::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .read(true)
+                .open(&tmp)
+                .await?
+        } else {
+            tokio::fs::File::create(&tmp).await?
+        };
+
+        // BLAKE3 must cover the whole file, so replay the bytes that are
+        // already on disk into the hasher before appending new ones.
+        let mut hasher = blake3::Hasher::new();
+        let mut received = 0u64;
+        if resume_at > 0 {
+            use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+            let want = resume_at.min(file.metadata().await?.len());
+            let mut buf = vec![0u8; 64 * 1024];
+            let mut left = want;
+            while left > 0 {
+                let take = left.min(buf.len() as u64) as usize;
+                let n = file.read(&mut buf[..take]).await?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                left -= n as u64;
+                received += n as u64;
+            }
+            file.seek(SeekFrom::Start(received)).await?;
+            progress.advance(received);
+        }
 
         self.tmp_paths.push(tmp.clone());
         self.current = Some(OpenFile {
@@ -548,8 +624,8 @@ impl WriteSession {
             entry,
             tmp,
             file,
-            hasher: blake3::Hasher::new(),
-            received: 0,
+            hasher,
+            received,
         });
         self.next_index = index + 1;
         Ok(())
@@ -600,6 +676,25 @@ fn tmp_path(dest: &Path) -> PathBuf {
     let mut name = dest.as_os_str().to_owned();
     name.push(".rustdrop-part");
     PathBuf::from(name)
+}
+
+/// Which part of an incoming chunk still needs writing at `received`.
+///
+/// * `Ok(Some(0))` - in order, write everything.
+/// * `Ok(Some(n))` - the chunk straddles the resume point, write `payload[n..]`.
+/// * `Ok(None)` - duplicate of bytes we already hold, write nothing.
+/// * `Err(())` - a gap: the chunk starts after `received`.
+fn chunk_tail(offset: u64, payload_len: usize, received: u64) -> Result<Option<usize>> {
+    let end = offset.saturating_add(payload_len as u64);
+    if end <= received {
+        return Ok(None);
+    }
+    if offset > received {
+        return Err(RustDropError::Protocol(format!(
+            "gap at offset {received}, got {offset}"
+        )));
+    }
+    Ok(Some((received - offset) as usize))
 }
 
 /// Map manifest entries onto safe absolute destinations under `out_dir`.
@@ -707,6 +802,20 @@ mod tests {
         }];
         let out = resolve_destinations(&entries, Path::new("/out")).unwrap();
         assert_eq!(out, vec![PathBuf::from("/out/a/b/c.txt")]);
+    }
+
+    #[test]
+    fn chunk_tail_classifies_resume_cases() {
+        // In order: write everything.
+        assert_eq!(chunk_tail(0, 10, 0).unwrap(), Some(0));
+        assert_eq!(chunk_tail(100, 10, 100).unwrap(), Some(0));
+        // Fully duplicate: nothing to do.
+        assert_eq!(chunk_tail(0, 10, 10).unwrap(), None);
+        assert_eq!(chunk_tail(0, 10, 50).unwrap(), None);
+        // Straddles the resume point: write only the tail.
+        assert_eq!(chunk_tail(0, 10, 6).unwrap(), Some(6));
+        // Gap: protocol error.
+        assert!(chunk_tail(20, 10, 10).is_err());
     }
 
     #[test]

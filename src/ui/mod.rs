@@ -147,9 +147,17 @@ impl ProgressSink for CliProgress {
         self.security_line(&format!("  trust code: {code}"));
     }
 
-    fn begin(&self, _files: usize, _bytes: u64) {
+    fn begin(&self, _files: usize, bytes: u64) {
         self.clear_spinner();
         self.ensure_bars();
+        let guard = self.overall.lock().expect("overall lock poisoned");
+        if let Some(bar) = guard.as_ref() {
+            // Watch mode starts a fresh session after the previous one
+            // finished, so the bar has to come back to life first.
+            bar.reset();
+            bar.set_length(bytes);
+            bar.set_position(0);
+        }
     }
 
     fn file(&self, path: &str, size: u64) {
@@ -209,6 +217,34 @@ impl Drop for CliProgress {
     fn drop(&mut self) {
         self.clear_spinner();
     }
+}
+
+/// Render `text` as a QR code using truecolor background cells.
+///
+/// Every module becomes two spaces with a black or white background, one
+/// line per module row. Unlike half-block glyphs this stays readable
+/// black-on-white on both light and dark terminal palettes.
+pub fn render_qr_ansi(text: &str) -> anyhow::Result<String> {
+    use anyhow::Context as _;
+    use qrcode::QrCode;
+
+    let code = QrCode::new(text.as_bytes()).context("text does not fit in a QR code")?;
+    let width = code.width();
+    let colors = code.to_colors();
+    const QUIET: usize = 4;
+    const DARK: &str = "\x1b[48;2;0;0;0m  ";
+    const LIGHT: &str = "\x1b[48;2;255;255;255m  ";
+
+    let mut out = String::new();
+    for y in 0..width + 2 * QUIET {
+        for x in 0..width + 2 * QUIET {
+            let inside = x >= QUIET && x < QUIET + width && y >= QUIET && y < QUIET + width;
+            let dark = inside && colors[(y - QUIET) * width + (x - QUIET)] == qrcode::Color::Dark;
+            out.push_str(if dark { DARK } else { LIGHT });
+        }
+        out.push_str("\x1b[0m\n");
+    }
+    Ok(out)
 }
 
 /// Interactive "do you accept this transfer?" prompt.
@@ -333,5 +369,41 @@ mod tests {
             bytes: 0,
             elapsed: Duration::from_secs(0),
         });
+    }
+}
+
+#[cfg(test)]
+mod qr_tests {
+    use super::render_qr_ansi;
+
+    #[test]
+    fn qr_cells_form_a_square_with_a_white_quiet_zone() {
+        let qr = render_qr_ansi("RUSTDROP").expect("short text fits");
+        let lines: Vec<&str> = qr.lines().collect();
+        assert!(
+            lines[0].starts_with("\x1b[48;2;255;255;255m  "),
+            "quiet zone starts white"
+        );
+        assert!(
+            qr.contains("\x1b[48;2;0;0;0m  "),
+            "payload has dark modules"
+        );
+
+        let cells: Vec<usize> = lines.iter().map(|l| l.matches("m  ").count()).collect();
+        assert!(
+            lines.iter().all(|l| l.ends_with("\x1b[0m")),
+            "each row resets color"
+        );
+        assert!(
+            cells.iter().all(|&c| c == cells[0]),
+            "all rows have the same width"
+        );
+        assert_eq!(cells[0], lines.len(), "code plus quiet zone is square");
+        assert!(cells[0] > 8, "4-module quiet zone on each side");
+    }
+
+    #[test]
+    fn qr_rejects_oversized_payloads() {
+        assert!(render_qr_ansi(&"x".repeat(5000)).is_err());
     }
 }
