@@ -16,7 +16,8 @@ use crate::protocol::{
     HelloAck, Manifest, check_version, read_frame, write_frame,
 };
 use crate::transfer::{
-    ProgressSink, TransferReport, decompress_chunk, human_bytes, sanitize_incoming_path,
+    ProgressSink, TransferReport, decompress_chunk, hash_file_prefix, human_bytes,
+    sanitize_incoming_path,
 };
 
 /// What the receiver does when a sender shows up.
@@ -45,8 +46,13 @@ pub struct ReceiveRequest {
     pub keep_open: bool,
     /// Refuse (rather than overwrite) destinations that already exist.
     pub no_clobber: bool,
-    /// Continue `.rustdrop-part` files left behind by an earlier attempt.
+    /// Continue `.rustdrop-part` files left behind by an earlier attempt,
+    /// after verifying their contents against the sender's resume proof.
     pub resume: bool,
+    /// Refuse any single file larger than this many bytes.
+    pub max_file_size: Option<u64>,
+    /// Refuse a session whose combined size exceeds this many bytes.
+    pub max_total_size: Option<u64>,
     /// Restore mtime/permissions on written files.
     pub preserve_attrs: bool,
     /// How long to wait for a sender before giving up.
@@ -68,7 +74,9 @@ impl Default for ReceiveRequest {
             confirm: None,
             keep_open: false,
             no_clobber: false,
-            resume: false,
+            resume: true,
+            max_file_size: None,
+            max_total_size: None,
             preserve_attrs: true,
             wait_timeout: Some(Duration::from_secs(600)),
             handshake_timeout: Duration::from_secs(30),
@@ -235,6 +243,31 @@ impl Receiver {
             }
         };
 
+        // ---- receiver-side size policy ------------------------------------
+        if let Some(max) = req.max_file_size
+            && let Some(big) = manifest.files.iter().find(|f| f.size > max)
+        {
+            let reason = format!(
+                "'{}' is {} which exceeds --max-file-size {}",
+                big.path,
+                human_bytes(big.size),
+                human_bytes(max)
+            );
+            send_abort(&mut stream, &mut ack_channel, &reason).await;
+            return Err(RustDropError::Rejected(reason));
+        }
+        if let Some(max) = req.max_total_size
+            && manifest.total_bytes > max
+        {
+            let reason = format!(
+                "transfer is {} which exceeds --max-total-size {}",
+                human_bytes(manifest.total_bytes),
+                human_bytes(max)
+            );
+            send_abort(&mut stream, &mut ack_channel, &reason).await;
+            return Err(RustDropError::Rejected(reason));
+        }
+
         let preview = TransferPreview {
             files: manifest.files.len(),
             bytes: manifest.total_bytes,
@@ -321,6 +354,54 @@ impl Receiver {
         };
         write_frame(&mut stream, &ack_channel.seal(&ready.encode()?)?).await?;
 
+        // ---- resume proof (protocol v2) -----------------------------------
+        // Only sent when we asked for a resume. A leftover that does not
+        // hash to the sender's proof has gone stale (source changed since);
+        // drop it for that file and tell the sender to stream from zero.
+        if resume_offsets.iter().any(|&at| at > 0) {
+            let frame = read_sealed(&mut stream, req.handshake_timeout).await?;
+            let plain = ack_channel
+                .open(&frame)
+                .map_err(|_| RustDropError::Handshake("resume proof did not decrypt".into()))?;
+            let hashes = match Ack::decode(&plain)? {
+                Ack::ResumeProof { hashes } => hashes,
+                other => {
+                    let reason = format!("expected a resume proof, got {other:?}");
+                    send_abort(&mut stream, &mut ack_channel, &reason).await;
+                    return Err(RustDropError::Protocol(reason));
+                }
+            };
+
+            let mut verified = resume_offsets.clone();
+            let mut rejected = 0u64;
+            for (i, at) in resume_offsets.iter().enumerate() {
+                if *at == 0 {
+                    continue;
+                }
+                let expected = hashes.get(i).copied().flatten();
+                let actual = hash_file_prefix(&tmp_path(&destinations[i]), *at)
+                    .await
+                    .ok();
+                if actual != expected {
+                    rejected += *at;
+                    verified[i] = 0;
+                }
+            }
+            if rejected > 0 {
+                progress.status(&format!(
+                    "{} of leftover data no longer matches the source; restarting those files",
+                    human_bytes(rejected)
+                ));
+            }
+            let accepted = Ack::ResumeAccepted {
+                resume: verified.clone(),
+            };
+            write_frame(&mut stream, &ack_channel.seal(&accepted.encode()?)?).await?;
+            resume_offsets = verified;
+        }
+
+        let resumed_total: u64 = resume_offsets.iter().sum();
+
         // ---- data --------------------------------------------------------
         progress.begin(manifest.files.len(), manifest.total_bytes);
         let started = std::time::Instant::now();
@@ -355,6 +436,7 @@ impl Receiver {
             files: manifest.files.len(),
             bytes: received,
             elapsed: started.elapsed(),
+            resumed: resumed_total,
         };
         let complete = Ack::Complete {
             files: report.files,

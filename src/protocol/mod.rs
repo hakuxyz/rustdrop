@@ -226,6 +226,17 @@ pub enum Ack {
     Complete { files: usize, bytes: u64 },
     /// Something went wrong; the sender aborts with `RustDropError::Rejected`.
     Abort { reason: String },
+
+    /// Protocol v2, sent by the *sender* between `Ready` and the stream:
+    /// one BLAKE3 digest per requested resume offset, covering exactly the
+    /// first `resume[i]` bytes of file `i`. `None` means "no proof" and the
+    /// receiver must treat the offset as zero. Lets a receiver detect
+    /// leftovers whose contents no longer match the source.
+    ResumeProof { hashes: Vec<Option<[u8; 32]>> },
+
+    /// Protocol v2, sent by the *receiver* after verifying the proof: the
+    /// final resume offsets the sender must stream from.
+    ResumeAccepted { resume: Vec<u64> },
 }
 
 impl Ack {

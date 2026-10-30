@@ -19,6 +19,9 @@ pub struct TransferReport {
     pub files: usize,
     pub bytes: u64,
     pub elapsed: Duration,
+    /// Bytes the receiver already had and did not receive again (resume).
+    /// Not included in `bytes`.
+    pub resumed: u64,
 }
 
 impl TransferReport {
@@ -34,15 +37,46 @@ impl TransferReport {
 
 impl std::fmt::Display for TransferReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let resumed = if self.resumed > 0 {
+            format!(", {} resumed", human_bytes(self.resumed))
+        } else {
+            String::new()
+        };
         write!(
             f,
-            "{} file(s), {} in {} ({}/s)",
+            "{} file(s){resumed}, {} in {} ({}/s)",
             self.files,
             human_bytes(self.bytes),
             human_duration(self.elapsed),
             human_bytes((self.bytes as f64 / self.elapsed.as_secs_f64().max(1e-9)) as u64),
         )
     }
+}
+
+/// BLAKE3 over the first `len` bytes of `path`.
+///
+/// Both sides hash the same prefix during a resume: the sender proves what
+/// it is about to skip, the receiver verifies its `.part` leftovers against
+/// that proof before a single chunk is skipped.
+pub async fn hash_file_prefix(path: &Path, len: u64) -> Result<[u8; 32]> {
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut left = len;
+    while left > 0 {
+        let take = left.min(buf.len() as u64) as usize;
+        let n = file.read(&mut buf[..take]).await?;
+        if n == 0 {
+            return Err(RustDropError::Protocol(format!(
+                "'{}' is shorter than the resume offset ({left} byte(s) missing)",
+                path.display()
+            )));
+        }
+        hasher.update(&buf[..n]);
+        left -= n as u64;
+    }
+    Ok(*hasher.finalize().as_bytes())
 }
 
 /// A file queued for transfer: on-disk source plus its wire metadata.

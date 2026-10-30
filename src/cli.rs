@@ -172,9 +172,22 @@ pub struct ReceiveArgs {
     #[arg(long)]
     pub no_clobber: bool,
 
-    /// Continue .rustdrop-part files left by an interrupted transfer
+    /// Discard .rustdrop-part leftovers and restart every file from scratch
+    /// (resuming with prefix verification is the default)
     #[arg(long)]
+    pub no_resume: bool,
+
+    /// Compatibility no-op: resuming is on by default
+    #[arg(long, hide = true)]
     pub resume: bool,
+
+    /// Refuse single files larger than this (accepts 500M, 1.5G, ...)
+    #[arg(long, value_name = "BYTES")]
+    pub max_file_size: Option<String>,
+
+    /// Refuse sessions whose combined size exceeds this (accepts 500M, 1.5G)
+    #[arg(long, value_name = "BYTES")]
+    pub max_total_size: Option<String>,
 
     /// Do not restore modification times on received files
     #[arg(long)]

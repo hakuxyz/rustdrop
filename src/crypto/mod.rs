@@ -36,7 +36,7 @@ use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret};
 use crate::error::{Result, RustDropError};
 
 /// Wire protocol version carried in the handshake.
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 
 /// Default plaintext chunk size (64 KiB): large enough to keep syscall and
 /// AEAD-per-chunk overhead negligible, small enough for smooth progress bars.

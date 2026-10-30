@@ -368,6 +368,7 @@ mod tests {
             files: 0,
             bytes: 0,
             elapsed: Duration::from_secs(0),
+            resumed: 0,
         });
     }
 }

@@ -14,7 +14,8 @@ use crate::protocol::{
     check_version, read_frame, write_frame,
 };
 use crate::transfer::{
-    ProgressSink, RateLimiter, TransferReport, collect_files_filtered, compress_chunk, human_bytes,
+    ProgressSink, RateLimiter, TransferReport, collect_files_filtered, compress_chunk,
+    hash_file_prefix, human_bytes,
 };
 
 /// Everything the sender needs to run one transfer.
@@ -105,7 +106,7 @@ pub async fn send(req: SendRequest, progress: &dyn ProgressSink) -> Result<Trans
     write_frame(&mut stream, &sealed).await?;
 
     let mut ack_channel = data_channel_key.ack_channel();
-    let resume_offsets =
+    let mut resume_offsets =
         match wait_ack(&mut stream, &mut ack_channel, req.handshake_timeout).await? {
             Ack::Ready { resume, .. } => resume,
             Ack::Abort { reason } => return Err(RustDropError::Rejected(reason)),
@@ -114,7 +115,42 @@ pub async fn send(req: SendRequest, progress: &dyn ProgressSink) -> Result<Trans
                     "receiver completed before any data was sent".into(),
                 ));
             }
+            _ => {
+                return Err(RustDropError::Protocol(
+                    "expected the receiver's readiness ack".into(),
+                ));
+            }
         };
+
+    // ---- resume proof (protocol v2) -------------------------------------
+    // Prove the prefixes the receiver claims to hold. It verifies them
+    // against its own .part files and answers with the final offsets, so a
+    // leftover that no longer matches the source restarts instead of
+    // poisoning the transfer.
+    if resume_offsets.iter().any(|&at| at > 0) {
+        let mut hashes: Vec<Option<[u8; 32]>> = Vec::with_capacity(files.len());
+        for (index, file) in files.iter().enumerate() {
+            let at = resume_offsets.get(index).copied().unwrap_or(0);
+            if at == 0 {
+                hashes.push(None);
+                continue;
+            }
+            hashes.push(Some(hash_file_prefix(&file.source, at).await?));
+        }
+        let proof = Ack::ResumeProof { hashes };
+        write_frame(&mut stream, &ack_channel.seal(&proof.encode()?)?).await?;
+        resume_offsets =
+            match wait_ack(&mut stream, &mut ack_channel, req.handshake_timeout).await? {
+                Ack::ResumeAccepted { resume } => resume,
+                Ack::Abort { reason } => return Err(RustDropError::Rejected(reason)),
+                _ => {
+                    return Err(RustDropError::Protocol(
+                        "expected the receiver's resume acceptance".into(),
+                    ));
+                }
+            };
+    }
+
     let resumed: u64 = resume_offsets.iter().sum();
     if resumed > 0 {
         progress.status(&format!(
@@ -161,14 +197,15 @@ pub async fn send(req: SendRequest, progress: &dyn ProgressSink) -> Result<Trans
                 files: n,
                 bytes,
                 elapsed,
+                resumed,
             };
             progress.finish(&report);
             Ok(report)
         }
         Ack::Abort { reason } => Err(RustDropError::Rejected(reason)),
-        Ack::Ready { .. } => Err(RustDropError::Protocol(
-            "receiver sent a second readiness ack".into(),
-        )),
+        Ack::Ready { .. } | Ack::ResumeProof { .. } | Ack::ResumeAccepted { .. } => Err(
+            RustDropError::Protocol("unexpected control frame after the transfer".into()),
+        ),
     }
 }
 

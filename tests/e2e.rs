@@ -434,9 +434,7 @@ async fn resume_continues_a_partial_download() {
     let part = dst.path().join("payload.bin.rustdrop-part");
     std::fs::write(&part, &payload[..have]).unwrap();
 
-    let mut request = receiver_request(dst.path());
-    request.resume = true;
-    let (addr, handle) = spawn_receiver(request).await;
+    let (addr, handle) = spawn_receiver(receiver_request(dst.path())).await;
 
     let report = send(sender_request(vec![source_file], addr), &NullProgress)
         .await
@@ -445,6 +443,10 @@ async fn resume_continues_a_partial_download() {
         report.bytes,
         (payload.len() - have) as u64,
         "sender must skip the prefix the receiver already holds"
+    );
+    assert_eq!(
+        report.resumed, have as u64,
+        "report must count resumed bytes"
     );
 
     assert_eq!(read(&dst.path().join("payload.bin")), payload);
@@ -466,9 +468,7 @@ async fn resume_restarts_when_the_leftover_cannot_belong() {
     let part = dst.path().join("payload.bin.rustdrop-part");
     std::fs::write(&part, vec![0u8; payload.len() + 999]).unwrap();
 
-    let mut request = receiver_request(dst.path());
-    request.resume = true;
-    let (addr, handle) = spawn_receiver(request).await;
+    let (addr, handle) = spawn_receiver(receiver_request(dst.path())).await;
 
     let report = send(sender_request(vec![source_file], addr), &NullProgress)
         .await
@@ -493,9 +493,7 @@ async fn resume_of_a_complete_part_writes_no_bytes() {
     let part = dst.path().join("payload.bin.rustdrop-part");
     std::fs::write(&part, &payload).unwrap();
 
-    let mut request = receiver_request(dst.path());
-    request.resume = true;
-    let (addr, handle) = spawn_receiver(request).await;
+    let (addr, handle) = spawn_receiver(receiver_request(dst.path())).await;
 
     let report = send(sender_request(vec![source_file], addr), &NullProgress)
         .await
@@ -632,4 +630,122 @@ fn watch_loop_sends_new_and_changed_files() {
 
     drop(sender);
     rt.block_on(async { rx_task.abort() });
+}
+
+#[tokio::test]
+async fn stale_resume_prefix_is_rejected_by_the_proof() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+
+    let payload: Vec<u8> = (0..300_000u32)
+        .map(|i| (i.wrapping_mul(11) % 250) as u8)
+        .collect();
+    let source_file = src.path().join("payload.bin");
+    std::fs::write(&source_file, &payload).unwrap();
+
+    // Same length as a legitimate prefix, but different content: only the
+    // resume proof can catch this (a size clamp cannot).
+    let have = 123_456usize;
+    let part = dst.path().join("payload.bin.rustdrop-part");
+    std::fs::write(&part, vec![0xAB; have]).unwrap();
+
+    let (addr, handle) = spawn_receiver(receiver_request(dst.path())).await;
+
+    let report = send(sender_request(vec![source_file], addr), &NullProgress)
+        .await
+        .expect("send");
+    assert_eq!(
+        report.bytes,
+        payload.len() as u64,
+        "stale leftover must trigger a full re-send"
+    );
+    assert_eq!(report.resumed, 0);
+    assert_eq!(read(&dst.path().join("payload.bin")), payload);
+    handle.await.unwrap().expect("receive");
+}
+
+#[tokio::test]
+async fn no_resume_discards_valid_leftovers() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+
+    let payload: Vec<u8> = (0..90_000u32).map(|i| (i % 247) as u8).collect();
+    let source_file = src.path().join("payload.bin");
+    std::fs::write(&source_file, &payload).unwrap();
+
+    let part = dst.path().join("payload.bin.rustdrop-part");
+    std::fs::write(&part, &payload[..40_000]).unwrap();
+
+    let mut request = receiver_request(dst.path());
+    request.resume = false;
+    let (addr, handle) = spawn_receiver(request).await;
+
+    let report = send(sender_request(vec![source_file], addr), &NullProgress)
+        .await
+        .expect("send");
+    assert_eq!(
+        report.bytes,
+        payload.len() as u64,
+        "--no-resume must re-send everything"
+    );
+    assert_eq!(report.resumed, 0);
+    assert_eq!(read(&dst.path().join("payload.bin")), payload);
+    handle.await.unwrap().expect("receive");
+}
+
+#[tokio::test]
+async fn max_file_size_rejects_before_any_byte_flows() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+
+    let source_file = src.path().join("big.bin");
+    std::fs::write(&source_file, vec![1u8; 100_000]).unwrap();
+
+    let mut request = receiver_request(dst.path());
+    request.max_file_size = Some(1024);
+    let (addr, handle) = spawn_receiver(request).await;
+
+    let err = send(sender_request(vec![source_file], addr), &NullProgress)
+        .await
+        .expect_err("oversized file must be refused");
+    let text = err.to_string();
+    assert!(
+        text.contains("--max-file-size") && text.contains("big.bin"),
+        "clear refusal, got: {text}"
+    );
+    assert!(!dst.path().join("big.bin").exists());
+    let rx_err = handle.await.unwrap().unwrap_err();
+    assert!(
+        matches!(rx_err, rustdrop::RustDropError::Rejected(_)),
+        "unexpected receiver error: {rx_err}"
+    );
+}
+
+#[tokio::test]
+async fn max_total_size_rejects_the_session() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+
+    let a = src.path().join("a.bin");
+    let b = src.path().join("b.bin");
+    std::fs::write(&a, vec![1u8; 60_000]).unwrap();
+    std::fs::write(&b, vec![2u8; 60_000]).unwrap();
+
+    let mut request = receiver_request(dst.path());
+    request.max_total_size = Some(100_000);
+    let (addr, handle) = spawn_receiver(request).await;
+
+    let err = send(sender_request(vec![a, b], addr), &NullProgress)
+        .await
+        .expect_err("oversized session must be refused");
+    let text = err.to_string();
+    assert!(
+        text.contains("--max-total-size"),
+        "clear refusal, got: {text}"
+    );
+    let rx_err = handle.await.unwrap().unwrap_err();
+    assert!(
+        matches!(rx_err, rustdrop::RustDropError::Rejected(_)),
+        "unexpected receiver error: {rx_err}"
+    );
 }

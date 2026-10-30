@@ -121,7 +121,7 @@ rustdrop send --to 192.168.1.10:9000 ~/storage/downloads/photo.jpg
 ```
 
 Everything else works the same as on the desktop - discovery, trust codes,
-`--resume`, `--json`.
+automatic resume, `--json`.
 
 ### From source
 
@@ -193,13 +193,23 @@ rustdrop send --compress --limit 24M --exclude '**/*.log' ./project
 ### 6. Resume an interrupted transfer
 
 ```bash
-# receiver: pick up where the *.rustdrop-part file left off
-rustdrop receive -o downloads --resume
+# receiver: resumes automatically, no flag needed
+rustdrop receive -o downloads
+
+# or throw the leftovers away and start over
+rustdrop receive -o downloads --no-resume
 ```
 
-Half-finished `*.rustdrop-part` files are verified and continued: the sender
-skips the bytes already on disk while BLAKE3 still covers the whole file. A
-leftover that cannot belong to the file simply restarts that one file.
+Half-finished `*.rustdrop-part` files are continued by default. Before a
+single byte is skipped, the sender proves each would-be-skipped prefix with a
+BLAKE3 digest and the receiver verifies its own leftover against it. A stale
+leftover (the source changed since) restarts that one file instead of
+poisoning the transfer, while the file-level BLAKE3 still covers the whole
+file. Optional size guards on the receiver side:
+
+```bash
+rustdrop receive -o inbox --max-file-size 500M --max-total-size 5G
+```
 
 ### 7. Keep a directory in sync
 
@@ -255,12 +265,20 @@ sequenceDiagram
     Note over S,R: 2. Trust - both sides print the same SAS code (e.g. 7GKM-2XQ4)
     S->>R: Manifest (encrypted: file tree, sizes, BLAKE3 hashes)
     R-->>S: Ready | Abort (rejected by policy / user / trust mismatch)
+    opt Resume (protocol v2) - only when a resume offset is offered
+        S->>R: ResumeProof (BLAKE3 per would-be-skipped prefix)
+        R-->>S: ResumeAccepted (verified offsets, stale leftovers zeroed)
+    end
     loop 3. Transfer - per-chunk AEAD, pipelined
         S->>R: DataFrame (ChaCha20-Poly1305, seq-numbered nonce)
         R-->>S: Ack
     end
     Note over R: 4. Verify BLAKE3 → atomic rename → restore mtime & permissions
 ```
+
+Both sides announce their protocol version during the hello: a current build
+talking to an older one fails fast with a clear `unsupported protocol
+version` error instead of hanging mid-transfer.
 
 ```mermaid
 flowchart LR
@@ -355,7 +373,9 @@ not collapse on huge files.
 | `-y, --yes` | Accept every transfer without asking |
 | `--keep-open` | Keep listening for more senders after each transfer |
 | `--no-clobber` | Refuse files that already exist |
-| `--resume` | Continue `*.rustdrop-part` files from an interrupted transfer |
+| `--no-resume` | Discard `*.rustdrop-part` leftovers (resume is the default) |
+| `--max-file-size <BYTES>` | Refuse single files larger than this |
+| `--max-total-size <BYTES>` | Refuse sessions whose combined size exceeds this |
 | `--no-preserve-time` | Do not restore modification times |
 | `--no-mdns` | Skip mDNS announcement |
 | `--timeout <SECS>` | Wait for a sender *(idle timeout with `--keep-open`, `0` = forever, default: 600)* |
@@ -405,7 +425,7 @@ rustdrop list --timeout 5    # keep browsing longer
 
 ```bash
 cargo build --all-targets
-cargo test --all-targets          # 57 unit + 21 end-to-end tests
+cargo test --all-targets          # 57 unit + 25 end-to-end tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
 
@@ -424,7 +444,8 @@ Contributions welcome - open an issue first for anything larger than a fix.
 - [x] mDNS discovery, trust codes, passphrase hardening
 - [x] Compression, rate limiting, excludes, resume-safe temp files
 - [x] `--json`, completions, keep-open mode, dry-run
-- [x] Chunk-level resume across sessions (`--resume`)
+- [x] Chunk-level resume across sessions, on by default (protocol v2 resume proof)
+- [x] Receiver size guards (`--max-file-size`, `--max-total-size`)
 - [x] Directory sync mode (`--watch`)
 - [x] QR-code pairing for passphrase bootstrap
 - [x] Android binaries for Termux

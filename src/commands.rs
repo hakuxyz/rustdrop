@@ -69,6 +69,7 @@ pub async fn send(args: SendArgs, verbose: bool, quiet: bool) -> Result<()> {
                 "peer": report.peer,
                 "files": report.files,
                 "bytes": report.bytes,
+                "resumed_bytes": report.resumed,
                 "elapsed_secs": report.elapsed.as_secs_f64(),
                 "mbps": report.mbps(),
             })
@@ -229,6 +230,7 @@ async fn watch_poll(
                         "peer": report.peer,
                         "files": report.files,
                         "bytes": report.bytes,
+                        "resumed_bytes": report.resumed,
                         "elapsed_secs": report.elapsed.as_secs_f64(),
                         "mbps": report.mbps(),
                     })
@@ -313,7 +315,19 @@ pub async fn receive(args: ReceiveArgs, verbose: bool, quiet: bool) -> Result<()
         confirm,
         keep_open: args.keep_open,
         no_clobber: args.no_clobber,
-        resume: args.resume,
+        resume: !args.no_resume,
+        max_file_size: args
+            .max_file_size
+            .as_deref()
+            .map(parse_rate)
+            .transpose()
+            .context("--max-file-size")?,
+        max_total_size: args
+            .max_total_size
+            .as_deref()
+            .map(parse_rate)
+            .transpose()
+            .context("--max-total-size")?,
         preserve_attrs: !args.no_preserve_time,
         wait_timeout: if args.timeout == 0 {
             None
@@ -336,6 +350,7 @@ pub async fn receive(args: ReceiveArgs, verbose: bool, quiet: bool) -> Result<()
                     "peer": r.peer,
                     "files": r.files,
                     "bytes": r.bytes,
+                    "resumed_bytes": r.resumed,
                     "elapsed_secs": r.elapsed.as_secs_f64(),
                     "mbps": r.mbps(),
                 })
