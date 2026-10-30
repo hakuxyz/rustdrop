@@ -8,4 +8,6 @@
 # received transfer litter
 *.rustdrop-part
 __pycache__/
+# demo/render.py side product
+assets/demo.png
 *.pyc

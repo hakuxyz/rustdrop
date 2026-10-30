@@ -749,3 +749,101 @@ async fn max_total_size_rejects_the_session() {
         "unexpected receiver error: {rx_err}"
     );
 }
+
+/// Run a rate-limited sender and yank it away the moment the receiver has
+/// written some bytes, simulating a killed sender mid-transfer.
+async fn interrupt_mid_transfer(source_file: &Path, addr: std::net::SocketAddr, part: &Path) {
+    let request = SendRequest {
+        limit_bps: Some(150_000),
+        ..sender_request(vec![source_file.to_path_buf()], addr)
+    };
+    let mut send_fut = Box::pin(send(request, &NullProgress));
+    let mut ticks = tokio::time::interval(Duration::from_millis(20));
+    let mut seen = 0u32;
+    loop {
+        tokio::select! {
+            res = &mut send_fut => panic!("send finished early: {res:?}"),
+            _ = ticks.tick() => {
+                if let Ok(meta) = tokio::fs::metadata(part).await
+                    && meta.len() > 0
+                {
+                    break;
+                }
+                seen += 1;
+                assert!(seen < 250, "receiver never wrote a partial file");
+            }
+        }
+    }
+    // Dropping the sender future closes the socket: the receiver sees the
+    // disconnect it used to answer with "sender went away".
+    drop(send_fut);
+}
+
+#[tokio::test]
+async fn interrupted_session_resumes_in_the_same_receiver() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+
+    let payload: Vec<u8> = (0..400_000u32).map(|i| (i % 251) as u8).collect();
+    let source_file = src.path().join("payload.bin");
+    std::fs::write(&source_file, &payload).unwrap();
+
+    let part = dst.path().join("payload.bin.rustdrop-part");
+
+    let mut request = receiver_request(dst.path());
+    request.keep_open = true;
+    request.wait_timeout = Some(Duration::from_secs(3));
+    let (addr, handle) = spawn_receiver(request).await;
+
+    interrupt_mid_transfer(&source_file, addr, &part).await;
+    assert!(
+        part.exists(),
+        "interrupted session must leave its .part behind"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let report = send(sender_request(vec![source_file], addr), &NullProgress)
+        .await
+        .expect("second send");
+    assert!(
+        report.resumed > 0,
+        "the same receiver must resume the leftover, got {:?}",
+        report
+    );
+    assert_eq!(report.bytes + report.resumed, payload.len() as u64);
+    assert_eq!(
+        read(&dst.path().join("payload.bin")),
+        payload,
+        "resumed file must be intact"
+    );
+    assert!(!part.exists(), "part must be renamed away on completion");
+    handle.abort();
+}
+
+#[tokio::test]
+async fn interrupted_session_without_resume_removes_parts() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+
+    let payload: Vec<u8> = (0..400_000u32).map(|i| (i % 249) as u8).collect();
+    let source_file = src.path().join("payload.bin");
+    std::fs::write(&source_file, &payload).unwrap();
+
+    let part = dst.path().join("payload.bin.rustdrop-part");
+
+    let mut request = receiver_request(dst.path());
+    request.resume = false;
+    request.keep_open = true;
+    request.wait_timeout = Some(Duration::from_secs(3));
+    let (addr, handle) = spawn_receiver(request).await;
+
+    interrupt_mid_transfer(&source_file, addr, &part).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert!(
+        !part.exists(),
+        "--no-resume must clean up the leftover after a failed session"
+    );
+    handle.abort();
+}

@@ -406,7 +406,7 @@ impl Receiver {
         progress.begin(manifest.files.len(), manifest.total_bytes);
         let started = std::time::Instant::now();
         let mut data_channel = keys.data_channel();
-        let mut session = WriteSession::new(destinations.clone(), resume_offsets);
+        let mut session = WriteSession::new(destinations.clone(), resume_offsets, req.resume);
 
         let outcome = receive_data(
             &mut stream,
@@ -418,7 +418,9 @@ impl Receiver {
         .await;
 
         if let Err(err) = outcome {
-            session.cleanup().await;
+            if !session.preserve {
+                session.cleanup().await;
+            }
             send_abort(
                 &mut stream,
                 &mut ack_channel,
@@ -509,6 +511,9 @@ struct WriteSession {
     resume: Vec<u64>,
     total_written: u64,
     complete: bool,
+    /// Keep unfinished `.part` files when the session ends early so the next
+    /// attempt can resume them (`resume == false` cleans up instead).
+    preserve: bool,
 }
 
 struct OpenFile {
@@ -521,7 +526,7 @@ struct OpenFile {
 }
 
 impl WriteSession {
-    fn new(destinations: Vec<PathBuf>, resume: Vec<u64>) -> Self {
+    fn new(destinations: Vec<PathBuf>, resume: Vec<u64>, preserve: bool) -> Self {
         Self {
             current: None,
             next_index: 0,
@@ -531,6 +536,7 @@ impl WriteSession {
             resume,
             total_written: 0,
             complete: false,
+            preserve,
         }
     }
 
@@ -657,6 +663,7 @@ impl WriteSession {
         }
 
         let entry = manifest.files[index as usize].clone();
+        progress.file(&entry.path, entry.size);
         let dest = self.destinations[index as usize].clone();
         let tmp = tmp_path(&dest);
 
@@ -740,7 +747,7 @@ impl WriteSession {
 
 impl Drop for WriteSession {
     fn drop(&mut self) {
-        if self.complete {
+        if self.complete || self.preserve {
             return;
         }
         // Synchronous fallback so a panic path still leaves no `.part` litter.

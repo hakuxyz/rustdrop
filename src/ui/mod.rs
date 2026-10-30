@@ -1,19 +1,16 @@
-//! Terminal presentation: progress bars, spinners and prompts.
+//! Terminal presentation: progress bars and prompts.
 //!
 //! All rendering goes to **stderr** so stdout stays clean for machine
 //! consumable output (`--json`, pipes).
 
 use std::io::IsTerminal;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use crate::transfer::{ProgressSink, TransferReport};
 
-const SPINNER_CHARS: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ";
 const BAR_CHARS: &str = "█░";
-const TICK: Duration = Duration::from_millis(80);
 
 /// [`ProgressSink`] implementation used by the CLI.
 pub struct CliProgress {
@@ -21,7 +18,6 @@ pub struct CliProgress {
     verbose: bool,
     tty: bool,
     multi: MultiProgress,
-    spinner: Mutex<Option<ProgressBar>>,
     overall: Mutex<Option<ProgressBar>>,
     file: Mutex<Option<ProgressBar>>,
 }
@@ -33,7 +29,6 @@ impl CliProgress {
             verbose,
             tty: std::io::stderr().is_terminal(),
             multi: MultiProgress::new(),
-            spinner: Mutex::new(None),
             overall: Mutex::new(None),
             file: Mutex::new(None),
         }
@@ -64,32 +59,6 @@ impl CliProgress {
             let _ = self.multi.println(format!("\x1b[1m\x1b[33m{msg}\x1b[0m"));
         } else {
             eprintln!("{msg}");
-        }
-    }
-
-    fn ensure_spinner(&self) -> Option<ProgressBar> {
-        if !self.tty || self.quiet {
-            return None;
-        }
-        let mut guard = self.spinner.lock().expect("spinner lock poisoned");
-        if let Some(bar) = guard.as_ref() {
-            return Some(bar.clone());
-        }
-        let style = ProgressStyle::with_template("{spinner:.cyan} {wide_msg}")
-            .expect("valid spinner template")
-            .tick_chars(SPINNER_CHARS);
-        let bar = self.multi.add(ProgressBar::new_spinner());
-        bar.set_style(style);
-        bar.enable_steady_tick(TICK);
-        *guard = Some(bar.clone());
-        Some(bar)
-    }
-
-    fn clear_spinner(&self) {
-        if let Ok(mut guard) = self.spinner.lock()
-            && let Some(bar) = guard.take()
-        {
-            bar.finish_and_clear();
         }
     }
 
@@ -125,14 +94,10 @@ impl CliProgress {
 
 impl ProgressSink for CliProgress {
     fn status(&self, msg: &str) {
-        if self.quiet {
-            return;
-        }
-        if let Some(spinner) = self.ensure_spinner() {
-            spinner.set_message(msg.to_string());
-        } else {
-            eprintln!("{msg}");
-        }
+        // A plain persistent line: state changes like "sender went away",
+        // "resuming 8.4 MiB" or "skipping ..." must survive the next update
+        // instead of vanishing with a redrawn spinner row.
+        self.line(msg);
     }
 
     fn discovered(&self, name: &str, addr: &str) {
@@ -148,7 +113,6 @@ impl ProgressSink for CliProgress {
     }
 
     fn begin(&self, _files: usize, bytes: u64) {
-        self.clear_spinner();
         self.ensure_bars();
         let guard = self.overall.lock().expect("overall lock poisoned");
         if let Some(bar) = guard.as_ref() {
@@ -206,16 +170,9 @@ impl ProgressSink for CliProgress {
         {
             bar.finish_and_clear();
         }
-        self.clear_spinner();
         if !self.quiet {
             self.line(&format!("  \x1b[32m✓\x1b[0m {report}"));
         }
-    }
-}
-
-impl Drop for CliProgress {
-    fn drop(&mut self) {
-        self.clear_spinner();
     }
 }
 
@@ -347,6 +304,8 @@ fn shorten(path: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]

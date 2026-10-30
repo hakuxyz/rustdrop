@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/hakuxyz/rustdrop/main/assets/demo.gif" alt="Terminal demo: rustdrop receiver and sender on a LAN" width="92%" />
+  <img src="https://raw.githubusercontent.com/hakuxyz/rustdrop/main/assets/demo.gif" alt="Terminal demo: the receiver keeps an interrupted transfer and resumes it on the next run" width="92%" />
 </p>
 
 <p align="center">
@@ -425,7 +425,7 @@ rustdrop list --timeout 5    # keep browsing longer
 
 ```bash
 cargo build --all-targets
-cargo test --all-targets          # 57 unit + 25 end-to-end tests
+cargo test --all-targets          # 57 unit + 27 end-to-end tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
 
