@@ -54,10 +54,10 @@ print the same **trust code**, and the file lands verified and encrypted.
 | **Encrypted end-to-end** | Ephemeral X25519 → HKDF-SHA256 → ChaCha20-Poly1305, with optional passphrase hardening. |
 | **Trust codes** | An 8-character short-authentication-string appears on both sides - compare it, kill the connection if it differs. MITM detection without a CA. |
 | **Zero configuration** | mDNS discovery (`_rustdrop._tcp`). Works the moment both machines are on the same network. |
-| **Actually fast** | ~400 MiB/s measured on real hardware (see [Performance](#performance)). Fully pipelined, `tokio`-powered, zero-copy chunking. |
+| **Actually fast** | Line-rate on a gigabit LAN; ~180-380 MiB/s CPU ceiling on loopback (see [Performance](#performance)). Fully pipelined, `tokio`-powered, zero-copy chunking. |
 | **Pretty** | Multi-progress bars per file + overall, per-chunk rate, ETA, trust-code prompts. |
 | **Scriptable** | `--json` summaries, `--quiet`, `--yes`, `--dry-run`, shell completions. |
-| **One static binary** | Single static file, no runtime deps, 3.5 MB, ships on Linux (glibc/musl), macOS (Intel/ARM), Windows and Android (Termux). |
+| **One static binary** | Single static file, no runtime deps, 3.4 MB, ships on Linux (glibc/musl), macOS (Intel/ARM), Windows and Android (Termux). |
 
 ---
 
@@ -322,18 +322,21 @@ multicast group and your transfer.
 
 ## Performance
 
-Measured on this machine over a gigabit-class link (loopback/LAN, single file,
-500 MiB):
+Measured on the dev machine (Intel i5-7500, 4 cores, NVMe SSD) over loopback
+(`127.0.0.1`, single 500 MiB file). Loopback never touches a network cable, so
+these numbers are a CPU/crypto ceiling, not a LAN benchmark:
 
 | Scenario | Throughput |
 | --- | --- |
-| Plain send, 500 MiB | **404 MiB/s** |
-| mDNS auto-discovery + plain send, 500 MiB | 404 MiB/s |
-| `--compress --limit 24M`, 46 MiB mixed tree | 55 MiB/s (capped by design) |
+| Plain send, 500 MiB (cold cache) | ~180 MiB/s |
+| Plain send, 500 MiB (warm cache, best run) | ~380 MiB/s |
+| `--compress --limit 24M`, 46 MiB mixed tree | ~55 MiB/s (capped by design) |
 
-Numbers vary with disk speed and NIC. RustDrop pipelines read → encrypt →
-write with bounded memory (`--chunk-size`, default 64 KiB), so throughput does
-not collapse on huge files.
+Real transfers over a cable are bounded by your NIC: a 1 Gbit/s link tops out
+around ~119 MiB/s before any protocol overhead, so on a typical gigabit LAN you
+will see line-rate, not these loopback numbers. RustDrop pipelines
+read → encrypt → write with bounded memory (`--chunk-size`, default 64 KiB), so
+throughput does not collapse on huge files.
 
 ---
 
